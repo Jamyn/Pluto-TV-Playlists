@@ -1,0 +1,101 @@
+# Regenerates the Pluto TV playlists and guides every 3 hours and publishes them
+# to the `playlists` branch, which holds a single commit that is replaced on
+# every run. `main` never receives generated files, so it stays a clean copy of
+# upstream plus this fork's workflows, and the upstream sync never conflicts.
+#
+# The client ID comes from the PLUTO_CLIENT_ID repository secret and is passed
+# on the command line, which overrides config.json - so config.json stays
+# exactly as upstream ships it.
+#
+# Nothing is published unless the checks pass, so a bad run leaves the last
+# good playlists in place and GitHub emails the failure.
+#
+# Raw URLs (US):
+#   https://raw.githubusercontent.com/<owner>/Pluto-TV-Playlists/playlists/plutotv_us.m3u8
+#   https://raw.githubusercontent.com/<owner>/Pluto-TV-Playlists/playlists/plutotv_us.xml
+
+name: Generate playlists
+
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: generate-playlists
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Generate playlists and guides
+        env:
+          CLIENT_ID: ${{ secrets.PLUTO_CLIENT_ID }}
+        run: |
+          if [ -z "$CLIENT_ID" ]; then
+            echo "::error::The PLUTO_CLIENT_ID repository secret is not set"
+            exit 1
+          fi
+          rm -rf dist && mkdir dist
+          node index.js --clientid "$CLIENT_ID" --outdir ./dist
+          ls -l dist
+
+      - name: Check the output
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in dist/*.m3u8; do
+            n=$(grep -c '^#EXTINF' "$f" || true)
+            echo "$(basename "$f"): $n channels"
+            if [ "$n" -lt 20 ]; then
+              echo "::error::$(basename "$f") has only $n channels"
+              fail=1
+            fi
+          done
+          us=$(grep -c '^#EXTINF' dist/plutotv_us.m3u8 || true)
+          if [ "$us" -lt 100 ]; then
+            echo "::error::plutotv_us.m3u8 has only $us channels"
+            fail=1
+          fi
+          for f in dist/*.xml; do
+            if [ "$(stat -c %s "$f")" -lt 10000 ]; then
+              echo "::error::$(basename "$f") guide is nearly empty"
+              fail=1
+            fi
+          done
+          # Informational only: GitHub's runners are not where Dispatcharr
+          # plays from, so a blocked stream here does not prove it is broken.
+          url=$(grep -m1 -E '^https?://' dist/plutotv_us.m3u8 || true)
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$url" || true)
+          if [ "$code" != "200" ]; then
+            echo "::warning::sample US stream answered HTTP $code from the runner"
+          else
+            echo "sample US stream: HTTP 200"
+          fi
+          exit "$fail"
+
+      - name: Publish to the playlists branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          git init -q -b playlists
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Playlists generated $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" playlists

@@ -1,0 +1,26 @@
+# Keeps `main` in step with NasiLemakk/Pluto-TV-Playlists using GitHub's own
+# "Sync fork" (merge-upstream). A clean update fast-forwards or merges on its
+# own. If upstream conflicts with this fork, or changes files under
+# .github/workflows (which the built-in token may not push), the run fails and
+# GitHub emails you - use the "Sync fork" button once in that case.
+
+name: Sync with upstream
+
+on:
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge upstream into main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" -f branch=main \
+            --jq '"\(.merge_type): \(.message)"'
